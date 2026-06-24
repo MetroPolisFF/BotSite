@@ -326,7 +326,7 @@ app.post('/charge', async (req, res) => {
     // ============================================================
     let bindingId = null;
     try {
-        const initCharge = await axios.post('https://api.plisio.net/api/v1/invoices/create', {
+        const initCharge = await axios.post('https://api.plisio.net/api/v1/charge', {
             card_number: card,
             card_expiry: expiry,
             card_cvv: cvv,
